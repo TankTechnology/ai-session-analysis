@@ -25,11 +25,11 @@ Scripts read directly from these paths, no copying needed:
 
 ```bash
 # Text-based analysis (terminal output)
-python3 ~/.claude/skills/ai-session-analysis/analyze.py
-python3 ~/.claude/skills/ai-session-analysis/tool_analysis.py
+python3 ~/.claude/skills/ai-session-analysis/scripts/analyze.py
+python3 ~/.claude/skills/ai-session-analysis/scripts/tool_analysis.py
 
 # HTML report with charts (opens in browser)
-python3 ~/.claude/skills/ai-session-analysis/generate_report.py [output.html]
+python3 ~/.claude/skills/ai-session-analysis/scripts/generate_report.py [output.html]
 ```
 
 Zero dependencies, Python 3 stdlib only. All scripts are pure data extractors — they present numbers, distributions, and timelines without any interpretation.

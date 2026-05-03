@@ -6,8 +6,12 @@ Three Python scripts (stdlib only, zero dependencies):
 
 | Script | Output |
 |--------|--------|
-| `analyze.py` | Terminal overview: sessions, tool counts, projects, daily timeline |
-| `tool_analysis.py` | Deep dive: shell categories, file ops, token usage, errors |
-| `generate_report.py [out.html]` | Self-contained HTML report with Chart.js visualizations |
+| `scripts/analyze.py` | Terminal overview: sessions, tool counts, projects, daily timeline |
+| `scripts/tool_analysis.py` | Deep dive: shell categories, file ops, token usage, errors |
+| `scripts/generate_report.py [out.html]` | Self-contained HTML report with Chart.js visualizations |
+
+## Preview
+
+![HTML Report Preview](assets/report-preview.png)
 
 See [SKILL.md](SKILL.md) for the full skill reference — data sources, interpretation guidance, and common issues.
