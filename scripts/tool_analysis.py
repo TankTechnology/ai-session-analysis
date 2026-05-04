@@ -8,23 +8,14 @@ Usage: python3 tool_analysis.py
 
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-HOME = Path.home()
+sys.path.insert(0, str(Path(__file__).parent))
+from shared import classify_shell_cmd, strip_home_prefix  # noqa: E402
 
-def classify_shell_cmd(cmd):
-    if not cmd: return "(empty)"
-    if "git " in cmd: return "git"
-    if any(kw in cmd for kw in ["rg ", "grep ", "find ", "mdfind "]): return "grep/find"
-    if any(kw in cmd for kw in ["cat ", "head ", "tail ", "sed ", "awk "]): return "view/read"
-    if any(kw in cmd for kw in ["npm ", "yarn ", "pnpm ", "npx "]): return "npm/yarn"
-    if any(kw in cmd for kw in ["python", "pip ", "pytest"]): return "python"
-    if "ls " in cmd or cmd.strip() == "ls": return "ls"
-    if "cd " in cmd or "pwd" == cmd.strip(): return "cd/pwd"
-    if any(kw in cmd for kw in ["curl ", "wget "]): return "network"
-    if any(kw in cmd for kw in ["rm ", "cp ", "mv ", "mkdir ", "touch "]): return "fs_ops"
-    return "other"
+HOME = Path.home()
 
 # ── Claude Code ──────────────────────────────────────────────
 
@@ -42,9 +33,10 @@ def analyze_claude():
     write_files = []
     edit_files = []
     project_tools = defaultdict(Counter)
+    parse_errors = 0
 
     for jf in jsonl_files:
-        proj = str(jf.relative_to(projects_dir).parts[0]).replace("-Users-qute-Program-", "")
+        proj = strip_home_prefix(str(jf.relative_to(projects_dir).parts[0]))
         try:
             for line in jf.read_text().strip().splitlines():
                 if not line.strip(): continue
@@ -68,8 +60,8 @@ def analyze_claude():
                         write_files.append(inp.get("file_path", ""))
                     elif tn == "Edit" and isinstance(inp, dict):
                         edit_files.append(inp.get("file_path", ""))
-        except:
-            pass
+        except Exception:
+            parse_errors += 1
 
     # Shell commands
     print(f"\n── Shell Commands ({len(shell_cmds):,} total) ──")
@@ -107,6 +99,9 @@ def analyze_claude():
         top3 = ", ".join(f"{t}({c})" for t, c in tools.most_common(3))
         print(f"  {proj:<50} {total:>6} — {top3}")
 
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
+
 # ── Codex ────────────────────────────────────────────────────
 
 def analyze_codex():
@@ -123,6 +118,7 @@ def analyze_codex():
     patches_total = 0
     errors_list = []
     token_in = 0; token_out = 0; token_cache = 0
+    parse_errors = 0
 
     for sf in jsonl_files:
         try:
@@ -147,7 +143,8 @@ def analyze_codex():
                     token_cache += p.get("cache_hit_tokens", 0) or 0
                 elif et == "error":
                     errors_list.append(str(p.get("message", ""))[:120])
-        except: pass
+        except Exception:
+            parse_errors += 1
 
     print(f"\n── Shell ({len(shell_cmds):,}) ──")
     cats = Counter()
@@ -169,6 +166,9 @@ def analyze_codex():
         for err, cnt in Counter(e[:80] for e in errors_list).most_common(3):
             print(f"  [{cnt}x] {err}")
 
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
+
 # ── Kimi Code ────────────────────────────────────────────────
 
 def analyze_kimi():
@@ -180,6 +180,7 @@ def analyze_kimi():
 
     tool_counts = Counter()
     shell_cmds = []
+    parse_errors = 0
 
     for wf in wire_files:
         try:
@@ -197,8 +198,9 @@ def analyze_kimi():
                     args = json.loads(args_str) if isinstance(args_str, str) else args_str
                     cmd = args.get("command", "")
                     if cmd: shell_cmds.append(cmd)
-                except: pass
-        except: pass
+                except Exception: pass
+        except Exception:
+            parse_errors += 1
 
     domain_tools = Counter()
     for tn, cnt in tool_counts.items():
@@ -226,6 +228,9 @@ def analyze_kimi():
         print(f"\n  Sample:")
         for cmd in shell_cmds[:5]:
             print(f"    $ {cmd[:150]}")
+
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
 
 if __name__ == "__main__":
     analyze_claude()

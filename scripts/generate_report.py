@@ -15,37 +15,18 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from shared import classify_shell_cmd, strip_home_prefix  # noqa: E402
+
 HOME = Path.home()
 NOW = datetime.now(timezone.utc)
-WEEK_AGO = NOW - timedelta(days=7)
+RECENT_DAYS = 7  # default, overridden by --days
+recent_cutoff = NOW - timedelta(days=RECENT_DAYS)
 
 
 # ═══════════════════════════════════════════════════════════════
 # Data Extraction
 # ═══════════════════════════════════════════════════════════════
-
-def classify_shell_cmd(cmd):
-    if not cmd:
-        return "(empty)"
-    if "git " in cmd or cmd.strip() == "git":
-        return "git"
-    if any(kw in cmd for kw in ["rg ", "grep ", "find ", "mdfind "]):
-        return "grep/find"
-    if any(kw in cmd for kw in ["npm ", "yarn ", "pnpm ", "npx "]):
-        return "npm/yarn"
-    if any(kw in cmd for kw in ["python", "pip ", "pytest"]):
-        return "python"
-    if any(kw in cmd for kw in ["cat ", "head ", "tail ", "sed ", "awk "]):
-        return "view/read"
-    if "ls " in cmd or cmd.strip() == "ls":
-        return "ls"
-    if "cd " in cmd or "pwd" == cmd.strip():
-        return "cd/pwd"
-    if any(kw in cmd for kw in ["curl ", "wget "]):
-        return "network"
-    if any(kw in cmd for kw in ["rm ", "cp ", "mv ", "mkdir ", "touch "]):
-        return "fs_ops"
-    return "other"
 
 
 def extract_claude():
@@ -69,6 +50,7 @@ def extract_claude():
     hour_bins = Counter()
     user_msg_count = 0
     sessions_with_tools = set()
+    parse_errors = 0
 
     # Recent 7-day (collected in same pass)
     recent_daily = Counter()
@@ -76,9 +58,10 @@ def extract_claude():
     recent_tools = Counter()
     recent_sessions_set = set()
 
+    session_epoch_ms = {}  # for scatter chart x-axis
     for jf in jsonl_files:
         sid = jf.stem
-        proj = str(jf.relative_to(projects_dir).parts[0]).replace("-Users-qute-Program-", "")
+        proj = strip_home_prefix(str(jf.relative_to(projects_dir).parts[0]))
         first_ts = None
         last_ts = None
         tool_count = 0
@@ -90,9 +73,11 @@ def extract_claude():
                 d = json.loads(line)
                 ts_str = d.get("timestamp", "")
                 dt = None
+                local_dt = None
                 if ts_str:
                     try:
                         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        local_dt = dt.astimezone()  # convert to local time
                     except Exception:
                         pass
 
@@ -129,15 +114,16 @@ def extract_claude():
                         tool_count += 1
                         sessions_with_tools.add(sid)
 
-                        if dt:
-                            date_key = dt.strftime("%Y-%m-%d")
+                        if local_dt:
+                            date_key = local_dt.strftime("%Y-%m-%d")
                             daily_tools[date_key] += 1
-                            hour_bins[dt.hour] += 1
+                            hour_bins[local_dt.hour] += 1
                             if first_ts is None:
-                                first_ts = dt
-                            last_ts = dt
+                                first_ts = local_dt
+                                session_epoch_ms[sid] = int(local_dt.timestamp() * 1000)
+                            last_ts = local_dt
 
-                            if dt >= WEEK_AGO:
+                            if local_dt >= recent_cutoff:
                                 recent_tools[tn] += 1
                                 recent_projects[proj] += 1
                                 recent_daily[date_key] += 1
@@ -168,7 +154,7 @@ def extract_claude():
                             })
 
         except Exception:
-            pass
+            parse_errors += 1
 
         if first_ts:
             session_info[sid] = {
@@ -231,6 +217,7 @@ def extract_claude():
         "duration_bins": dur_bins,
         "avg_duration_min": round(sum(durations) / len(durations), 1) if durations else 0,
         "failure_count": sum(failures.values()),
+        "parse_errors": parse_errors,
         "total_edit_diff": total_edit_diff,
         "edit_count_total": len(edit_sizes),
         # Recent
@@ -243,11 +230,12 @@ def extract_claude():
         "session_scatter": [
             {
                 "date": v["first_ts"][:10],
+                "epoch_ms": session_epoch_ms.get(sid, 0),
                 "hour": datetime.fromisoformat(v["first_ts"]).hour,
                 "tools": min(v["tool_count"], 200),
                 "project": v["project"][:40],
             }
-            for v in session_info.values()
+            for sid, v in session_info.items()
             if v["tool_count"] > 0
         ],
     }
@@ -260,6 +248,7 @@ def extract_codex():
 
     session_count = 0
     daily_sessions = Counter()
+    hour_bins = Counter()
     shell_cmds = []
     exit_codes = Counter()
     patches_ok = 0
@@ -272,6 +261,9 @@ def extract_codex():
     models = Counter()
     event_counts = Counter()
     turn_count = 0
+    parse_errors = 0
+    recent_sessions = 0
+    recent_daily = Counter()
 
     for sf in jsonl_files:
         # Per-file max values (Codex token_count events report cumulative
@@ -291,7 +283,16 @@ def extract_codex():
                     models[p.get("model_provider", "?")] += 1
                     ts = p.get("timestamp", "")
                     if ts:
-                        daily_sessions[ts[:10]] += 1
+                        try:
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            local_dt = dt.astimezone()
+                            daily_sessions[local_dt.strftime("%Y-%m-%d")] += 1
+                            hour_bins[local_dt.hour] += 1
+                            if local_dt >= recent_cutoff:
+                                recent_sessions += 1
+                                recent_daily[local_dt.strftime("%Y-%m-%d")] += 1
+                        except Exception:
+                            pass
 
                 elif d.get("type") == "event_msg":
                     p = d.get("payload", {})
@@ -329,7 +330,7 @@ def extract_codex():
                         turn_count += 1
 
         except Exception:
-            pass
+            parse_errors += 1
         token_in += file_ti
         token_out += file_to
         token_cache += file_tc
@@ -358,6 +359,10 @@ def extract_codex():
         "error_count": len(errors),
         "models": dict(models),
         "events": dict(event_counts.most_common(12)),
+        "parse_errors": parse_errors,
+        "hour_bins": {str(h): hour_bins[h] for h in range(24)},
+        "recent_sessions": recent_sessions,
+        "recent_daily": dict(sorted(recent_daily.items())),
     }
 
 
@@ -367,11 +372,13 @@ def extract_kimi():
 
     tool_counts = Counter()
     shell_cmds = []
+    hour_bins = Counter()
     token_in = 0
     token_out = 0
     token_cache_read = 0
     session_count = 0
     failures = 0
+    parse_errors = 0
 
     for wf in wire_files:
         has_tools = False
@@ -385,6 +392,19 @@ def extract_kimi():
                     continue
 
                 mtype = msg.get("type", "")
+
+                # Track hour from timestamp if available
+                ts_raw = d.get("timestamp", "")
+                if ts_raw and mtype == "ToolCall":
+                    try:
+                        if isinstance(ts_raw, (int, float)):
+                            dt = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
+                        else:
+                            dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                        local_dt = dt.astimezone()
+                        hour_bins[local_dt.hour] += 1
+                    except Exception:
+                        pass
 
                 if mtype == "ToolCall":
                     func = msg.get("payload", {}).get("function", msg.get("function", {}))
@@ -414,7 +434,7 @@ def extract_kimi():
                         token_cache_read += tu.get("input_cache_read", 0) or 0
 
         except Exception:
-            pass
+            parse_errors += 1
         if has_tools:
             session_count += 1
 
@@ -446,6 +466,8 @@ def extract_kimi():
         "token_out": token_out,
         "token_cache": token_cache_read,
         "failure_count": failures,
+        "parse_errors": parse_errors,
+        "hour_bins": {str(h): hour_bins[h] for h in range(24)},
     }
 
 
@@ -554,7 +576,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 4
 
 def js_safe(obj):
     """Serialize Python object to JSON-safe JS embedded in HTML."""
-    return json.dumps(obj, ensure_ascii=False)
+    return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
 
 
 def _fmt(n):
@@ -639,7 +661,7 @@ function mk(id, cfg) { const c = document.getElementById(id); return c ? new Cha
   </div>
   <div class="row2">
     <div class="chart-wrap"><h4>Projects</h4><canvas id="ccProjects"></canvas></div>
-    <div class="chart-wrap"><h4>Activity by Hour (UTC)</h4><canvas id="ccHours"></canvas></div>
+    <div class="chart-wrap"><h4>Activity by Hour (Local)</h4><canvas id="ccHours"></canvas></div>
   </div>
   <div class="row2">
     <div class="chart-wrap"><h4>Session Timeline</h4><canvas id="ccScatter"></canvas></div>
@@ -730,12 +752,17 @@ function mk(id, cfg) { const c = document.getElementById(id); return c ? new Cha
 
     # Build cross-tool sections (only if 2+ tools have data)
     cross_timeline = ""
+    cross_hours = ""
     cross_comparison = ""
     token_comparison = ""
     if tools_with_data >= 2:
         cross_timeline = f"""
 <h2>Cross-Tool Activity Timeline</h2>
 <div class="chart-wrap"><canvas id="overviewTimeline"></canvas></div>"""
+
+        cross_hours = """
+<h2>24-Hour Activity (Combined)</h2>
+<div class="chart-wrap"><canvas id="combinedHours"></canvas></div>"""
 
         cross_comparison = f"""
 <h2>Cross-Tool Comparison</h2>
@@ -803,6 +830,7 @@ function mk(id, cfg) { const c = document.getElementById(id); return c ? new Cha
 </div>
 
 {cross_timeline}
+{cross_hours}
 {cross_comparison}
 
 <!-- ═══════════════ PER-TOOL SECTIONS ═══════════════ -->
@@ -904,6 +932,22 @@ mk('crossScale', {{
   }});
 }})();
 
+	// ── Combined 24-Hour Activity ──
+	(function() {{
+	  const labels = Array.from({{length: 24}}, (_,i) => `${{i}}:00`);
+	  const total = Array.from({{length: 24}}, (_,i) =>
+	    ((CC.hour_bins||{{}})[String(i)]||0) + ((CX.hour_bins||{{}})[String(i)]||0) + ((KC.hour_bins||{{}})[String(i)]||0)
+	  );
+	  mk('combinedHours', {{
+	    type: 'bar',
+	    data: {{
+	      labels,
+	      datasets: [{{ data: total, backgroundColor: '#58a6ff88', borderColor: '#58a6ff', borderWidth: 1, borderRadius: 4 }}]
+	    }},
+	    options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ title: {{ display: true, text: 'Hour (Local)', color: '#8b949e' }} }}, y: {{ beginAtZero: true, title: {{ display: true, text: 'Tool Calls / Sessions', color: '#8b949e' }} }} }} }}
+	  }});
+	}})();
+
 // ══════════ CLAUDE CODE CHARTS ══════════
 
 mk('ccTools', {{
@@ -957,17 +1001,20 @@ mk('ccHours', {{
     labels: Array.from({{length: 24}}, (_,i) => `${{i}}:00`),
     datasets: [{{ data: Array.from({{length: 24}}, (_,i) => (CC.hour_bins||{{}})[String(i)]||0), backgroundColor: '#58a6ff66', borderColor: '#58a6ff', borderWidth: 1, borderRadius: 3 }}]
   }},
-  options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }}, x: {{ title: {{ display: true, text: 'Hour (UTC)', color: '#8b949e' }} }} }} }}
+  options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }}, x: {{ title: {{ display: true, text: 'Hour (Local)', color: '#8b949e' }} }} }} }}
 }});
 
 mk('ccScatter', {{
   type: 'scatter',
   data: {{
-    datasets: [{{ label: 'Sessions', data: CC.session_scatter.map(s => ({{ x: s.date, y: s.hour, r: Math.max(3, Math.sqrt(s.tools)*1.5) }})), backgroundColor: '#58a6ff66', borderColor: '#58a6ff', borderWidth: 1 }}]
+    datasets: [{{ label: 'Sessions', data: CC.session_scatter.map(s => ({{ x: s.epoch_ms, y: s.hour, r: Math.max(3, Math.sqrt(s.tools)*1.5) }})), backgroundColor: '#58a6ff66', borderColor: '#58a6ff', borderWidth: 1 }}]
   }},
   options: {{
     responsive: true,
-    scales: {{ x: {{ grid: {{ color: '#21262d' }} }}, y: {{ min: 0, max: 23, ticks: {{ stepSize: 3 }} }} }},
+    scales: {{
+      x: {{ type: 'linear', ticks: {{ callback: v => new Date(v).toISOString().slice(0,10), maxTicksLimit: 12 }}, grid: {{ color: '#21262d' }} }},
+      y: {{ min: 0, max: 23, ticks: {{ stepSize: 3, callback: v => v + ':00' }} }}
+    }},
     plugins: {{ tooltip: {{ callbacks: {{ label: ctx => {{ const s = CC.session_scatter[ctx.dataIndex]; return s ? s.project + ' — ' + s.tools + ' tools' : ''; }} }} }} }}
   }}
 }});
@@ -1051,7 +1098,21 @@ mk('kcShell', {{
 # ═══════════════════════════════════════════════════════════════
 
 def main():
-    output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("ai-session-report.html")
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate HTML report from AI coding session data")
+    parser.add_argument("output", nargs="?", default="ai-session-report.html",
+                        help="Output HTML file path")
+    parser.add_argument("--days", type=int, default=7,
+                        help="Recent activity window in days (default: 7)")
+    parser.add_argument("--no-open", action="store_true",
+                        help="Don't open the report in browser")
+    args = parser.parse_args()
+
+    global RECENT_DAYS, recent_cutoff
+    RECENT_DAYS = args.days
+    recent_cutoff = NOW - timedelta(days=RECENT_DAYS)
+
+    output = Path(args.output)
 
     print("Extracting Claude Code data...")
     cc = extract_claude()
@@ -1069,7 +1130,10 @@ def main():
     html = build_html(cc, cx, kc)
     output.write_text(html, encoding="utf-8")
     print(f"Done: {output} ({output.stat().st_size // 1024}KB)")
-    print(f"Open with: open {output}")
+    if not args.no_open:
+        import webbrowser
+        webbrowser.open(str(output.resolve()))
+        print(f"Opened: {output}")
 
 
 if __name__ == "__main__":

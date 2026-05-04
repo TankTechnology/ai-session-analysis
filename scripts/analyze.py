@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """AI Session Analysis — data extraction only. No interpretation."""
 
+import argparse
 import json
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from shared import strip_home_prefix  # noqa: E402
 
 HOME = Path.home()
 
 def fmt_ts_ms(ms):
     try: return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-    except: return "?"
+    except Exception: return "?"
 
 def fmt_ts_iso(s):
     try: return s[:10]
-    except: return "?"
+    except Exception: return "?"
 
 # ── Claude Code ──────────────────────────────────────────────
 
@@ -35,19 +40,25 @@ def analyze_claude():
     projects = Counter()
     session_first_seen = {}
     session_last_seen = {}
+    parse_errors = 0
 
     for jf in jsonl_files:
         sid = jf.stem
         sessions.add(sid)
-        proj_name = str(jf.relative_to(projects_dir).parts[0]).replace("-Users-qute-Program-", "")
+        proj_name = strip_home_prefix(str(jf.relative_to(projects_dir).parts[0]))
         try:
             for line in jf.read_text().strip().splitlines():
                 if not line.strip(): continue
                 d = json.loads(line)
                 typ = d.get("type", "?")
                 message_types[typ] += 1
-                ts = d.get("timestamp", "")[:10]
-                if not ts: continue
+                ts_raw = d.get("timestamp", "")
+                if not ts_raw: continue
+                try:
+                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    ts = dt.astimezone().strftime("%Y-%m-%d")
+                except Exception:
+                    continue
 
                 # Track session time range
                 if sid not in session_first_seen:
@@ -63,8 +74,8 @@ def analyze_claude():
                                 tool_counts[tn] += 1
                                 projects[proj_name] += 1
                                 daily[ts] += 1
-        except:
-            pass
+        except Exception:
+            parse_errors += 1
 
     print(f"Sessions: {len(sessions)}")
     print(f"Messages: {sum(message_types.values()):,}")
@@ -89,6 +100,8 @@ def analyze_claude():
     if session_first_seen:
         all_dates = sorted(set(list(session_first_seen.values()) + list(session_last_seen.values())))
         print(f"\nDate range: {all_dates[0]} → {all_dates[-1]}")
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
 
     return {
         "sessions": len(sessions),
@@ -115,6 +128,7 @@ def analyze_codex():
     session_count = 0
     daily = Counter()
     date_range = []
+    parse_errors = 0
 
     for sf in jsonl_files:
         try:
@@ -131,8 +145,8 @@ def analyze_codex():
                     event_counts[et] += 1
                     if et == "exec_command_end":
                         exit_codes[str(d["payload"].get("exit_code", "?"))] += 1
-        except:
-            pass
+        except Exception:
+            parse_errors += 1
 
     print(f"Sessions: {session_count}")
     print(f"\n── Events ({sum(event_counts.values()):,}) ──")
@@ -152,6 +166,8 @@ def analyze_codex():
     if date_range:
         date_range.sort()
         print(f"\nDate range: {date_range[0]} → {date_range[-1]}")
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
 
     return {"sessions": session_count, "events": sum(event_counts.values())}
 
@@ -169,6 +185,7 @@ def analyze_kimi():
     tool_counts = Counter()
     session_count = 0
     all_tool_names = set()
+    parse_errors = 0
 
     for wf in wire_files:
         has_tools = False
@@ -183,8 +200,8 @@ def analyze_kimi():
                     tool_counts[tn] += 1
                     all_tool_names.add(tn)
                     has_tools = True
-        except:
-            pass
+        except Exception:
+            parse_errors += 1
         if has_tools:
             session_count += 1
 
@@ -200,6 +217,8 @@ def analyze_kimi():
     print(f"\n── All tool names ({len(all_tool_names)}) ──")
     for tn in sorted(all_tool_names):
         print(f"  {tn}")
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
 
     return {"sessions": session_count, "tools": total, "tool_names": tool_counts}
 
@@ -228,25 +247,26 @@ def cross_analysis(cc, cx, kc):
 
 # ── Recent Activity (data only) ──────────────────────────────
 
-def recent_activity():
+def recent_activity(days=7):
     print("\n" + "=" * 60)
-    print("RECENT ACTIVITY — Last 7 Days (Claude Code)")
+    print(f"RECENT ACTIVITY — Last {days} Days (Claude Code)")
     print("=" * 60)
 
     projects_dir = HOME / ".claude" / "projects"
     jsonl_files = list(projects_dir.rglob("*.jsonl"))
 
     now = datetime.now(timezone.utc)
-    week_ago = now - timedelta(days=7)
+    week_ago = now - timedelta(days=days)
 
     recent_tools = Counter()
     recent_projects = Counter()
     recent_daily = Counter()
     recent_sessions = set()
     recent_session_dates = defaultdict(list)  # session -> [dates]
+    parse_errors = 0
 
     for jf in jsonl_files:
-        proj = str(jf.relative_to(projects_dir).parts[0]).replace("-Users-qute-Program-", "")
+        proj = strip_home_prefix(str(jf.relative_to(projects_dir).parts[0]))
         session_recent = False
         try:
             for line in jf.read_text().strip().splitlines():
@@ -256,11 +276,11 @@ def recent_activity():
                 if not ts: continue
                 try:
                     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except:
+                except Exception:
                     continue
                 if dt < week_ago: continue
                 session_recent = True
-                date_key = ts[:10]
+                date_key = dt.astimezone().strftime("%Y-%m-%d")
                 recent_session_dates[jf.stem].append(date_key)
 
                 if d.get("type") == "assistant":
@@ -272,8 +292,8 @@ def recent_activity():
                                 recent_tools[tn] += 1
                                 recent_projects[proj] += 1
                                 recent_daily[date_key] += 1
-        except:
-            pass
+        except Exception:
+            parse_errors += 1
         if session_recent:
             recent_sessions.add(jf.stem)
 
@@ -287,7 +307,7 @@ def recent_activity():
     print(f"Tool calls: {total:,}")
     print(f"Active projects: {len(recent_projects)}")
     active_days = len(recent_daily)
-    print(f"Active days: {active_days}/7")
+    print(f"Active days: {active_days}/{days}")
 
     print(f"\n── Daily tool calls ──")
     for date in sorted(recent_daily.keys()):
@@ -313,14 +333,21 @@ def recent_activity():
         sid_files = [jf for jf in jsonl_files if jf.stem == sid]
         proj = "?"
         if sid_files:
-            proj = str(sid_files[0].relative_to(projects_dir).parts[0]).replace("-Users-qute-Program-", "")
+            proj = strip_home_prefix(str(sid_files[0].relative_to(projects_dir).parts[0]))
         print(f"  {date_range}  {proj[:55]}")
 
+    if parse_errors:
+        print(f"\nParse errors: {parse_errors}")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Analyze AI coding session data")
+    parser.add_argument("--days", type=int, default=7,
+                        help="Recent activity window in days (default: 7)")
+    args = parser.parse_args()
+
     cc = analyze_claude()
     cx = analyze_codex()
     kc = analyze_kimi()
     cross_analysis(cc, cx, kc)
-    recent_activity()
+    recent_activity(days=args.days)
     print("\nDone.")

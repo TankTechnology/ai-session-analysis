@@ -70,6 +70,10 @@ Read both outputs carefully. Then tell the user what you see. Consider:
 
 **Do not** apply fixed thresholds or rules ("if bash > 40% then warn"). Look at the whole picture and use judgment. If something stands out, mention it. If nothing does, say so.
 
+## Security Note
+
+The HTML report (`generate_report.py`) embeds your session data directly — file paths, shell commands, project names, and tool usage patterns. This is safe for personal use on your own machine, but **do not share the generated HTML file** with others or host it publicly. The terminal-based scripts (`analyze.py`, `tool_analysis.py`) only print aggregate statistics and are safe to share.
+
 ## Common Issues
 
 - **Claude Code shows few tools**: Tools are in `~/.claude/projects/*.jsonl` (assistant → content blocks with `"type": "tool_use"`), not in `history.jsonl`.
